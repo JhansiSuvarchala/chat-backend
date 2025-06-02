@@ -5,6 +5,7 @@ const multer = require("multer");
 const path = require("path");
 const http = require("http");
 const { Server } = require("socket.io");
+const { body, validationResult } = require("express-validator");
 
 const app = express();
 const server = http.createServer(app);
@@ -37,32 +38,48 @@ const chatSchema = new mongoose.Schema(
 
 const ChatMessage = mongoose.model("ChatMessage", chatSchema);
 
-// Multer setup for file uploads
+// Multer setup for file uploads with file type validation
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
     cb(null, "uploads/");
   },
   filename: function (req, file, cb) {
-    // Use Date.now + original name to avoid collisions
     cb(null, Date.now() + path.extname(file.originalname));
   },
 });
-const upload = multer({ storage });
 
-app.post("/upload", upload.single("file"), (req, res) => {
-  if (!req.file) {
-    return res.status(400).json({ error: "No file uploaded" });
-  }
-  // Return URL for frontend to access
-  const fileUrl = `${req.protocol}://${req.get("host")}/uploads/${req.file.filename}`;
-  res.json({ fileUrl });
+const upload = multer({
+  storage,
+  fileFilter: (req, file, cb) => {
+    const allowedTypes = /jpeg|jpg|png|gif|pdf|docx|txt/;
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (allowedTypes.test(ext)) {
+      cb(null, true);
+    } else {
+      cb(new Error("Unsupported file type"));
+    }
+  },
+});
+
+// File upload route with error handling
+app.post("/upload", (req, res) => {
+  upload.single("file")(req, res, function (err) {
+    if (err) {
+      return res.status(400).json({ error: err.message });
+    }
+    if (!req.file) {
+      return res.status(400).json({ error: "No file uploaded" });
+    }
+    const fileUrl = `${req.protocol}://${req.get("host")}/uploads/${req.file.filename}`;
+    res.json({ fileUrl });
+  });
 });
 
 app.get("/", (req, res) => {
   res.send("Backend server is running!");
 });
 
-// **Add this GET route to fetch messages by roomId**
+// Get messages by roomId
 app.get("/messages/:roomId", async (req, res) => {
   const { roomId } = req.params;
   try {
@@ -73,35 +90,57 @@ app.get("/messages/:roomId", async (req, res) => {
   }
 });
 
-app.post("/messages", async (req, res) => {
-  const { user, message, room, fileUrl } = req.body;
-  try {
-    const newMsg = new ChatMessage({ user, message, room, fileUrl });
-    const savedMsg = await newMsg.save();
-    io.to(room).emit("receive_message", savedMsg);
-    res.status(201).json(savedMsg);
-  } catch (err) {
-    res.status(500).json({ error: "Failed to save message" });
-  }
-});
+// Post new message with validation and sanitization
+app.post(
+  "/messages",
+  [
+    body("user").trim().escape(),
+    body("message").trim().escape(),
+    body("room").trim().escape(),
+    body("fileUrl").optional().isURL(),
+  ],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
 
-app.put("/messages/:id", async (req, res) => {
-  const { id } = req.params;
-  const { message } = req.body;
-  try {
-    const updatedMsg = await ChatMessage.findByIdAndUpdate(
-      id,
-      { message },
-      { new: true }
-    );
-    if (!updatedMsg) return res.status(404).json({ error: "Message not found" });
-    io.to(updatedMsg.room).emit("edit_message", updatedMsg);
-    res.json(updatedMsg);
-  } catch (err) {
-    res.status(500).json({ error: "Failed to update message" });
+    const { user, message, room, fileUrl } = req.body;
+    try {
+      const newMsg = new ChatMessage({ user, message, room, fileUrl });
+      const savedMsg = await newMsg.save();
+      io.to(room).emit("receive_message", savedMsg);
+      res.status(201).json(savedMsg);
+    } catch (err) {
+      res.status(500).json({ error: "Failed to save message" });
+    }
   }
-});
+);
 
+// Update message text with validation
+app.put(
+  "/messages/:id",
+  [body("message").trim().escape()],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
+    const { id } = req.params;
+    const { message } = req.body;
+    try {
+      const updatedMsg = await ChatMessage.findByIdAndUpdate(id, { message }, { new: true });
+      if (!updatedMsg) return res.status(404).json({ error: "Message not found" });
+      io.to(updatedMsg.room).emit("edit_message", updatedMsg);
+      res.json(updatedMsg);
+    } catch (err) {
+      res.status(500).json({ error: "Failed to update message" });
+    }
+  }
+);
+
+// Delete message
 app.delete("/messages/:id", async (req, res) => {
   const { id } = req.params;
   try {
@@ -114,12 +153,28 @@ app.delete("/messages/:id", async (req, res) => {
   }
 });
 
+// Socket.io connection
 io.on("connection", (socket) => {
   console.log("A user connected: ", socket.id);
 
   socket.on("join_room", (room) => {
     socket.join(room);
     console.log(`User joined room: ${room}`);
+  });
+
+  // New socket event for sending messages directly via socket.io
+  socket.on("send_message", async (data) => {
+    // Basic validation on socket side (optional)
+    if (!data.user || !data.room) {
+      return socket.emit("error", "User and room are required");
+    }
+    try {
+      const newMsg = new ChatMessage(data);
+      const savedMsg = await newMsg.save();
+      io.to(data.room).emit("receive_message", savedMsg);
+    } catch (err) {
+      socket.emit("error", "Failed to send message");
+    }
   });
 
   socket.on("disconnect", () => {
