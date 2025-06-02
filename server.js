@@ -62,6 +62,16 @@ app.get("/", (req, res) => {
   res.send("Backend server is running!");
 });
 
+// **Add this GET route to fetch messages by roomId**
+app.get("/messages/:roomId", async (req, res) => {
+  const { roomId } = req.params;
+  try {
+    const messages = await ChatMessage.find({ room: roomId }).sort({ createdAt: 1 });
+    res.json(messages);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch messages" });
+  }
+});
 
 app.post("/messages", async (req, res) => {
   const { user, message, room, fileUrl } = req.body;
@@ -117,7 +127,7 @@ io.on("connection", (socket) => {
   });
 });
 
-const PORT = 5000;
+const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
   console.log(`Server listening on port ${PORT}`);
 });
