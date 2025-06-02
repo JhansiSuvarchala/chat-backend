@@ -58,15 +58,10 @@ app.post("/upload", upload.single("file"), (req, res) => {
   res.json({ fileUrl });
 });
 
-app.get("/messages/:room", async (req, res) => {
-  const { room } = req.params;
-  try {
-    const messages = await ChatMessage.find({ room }).sort({ createdAt: 1 });
-    res.json(messages);
-  } catch (err) {
-    res.status(500).json({ error: "Error fetching messages" });
-  }
+app.get("/", (req, res) => {
+  res.send("Backend server is running!");
 });
+
 
 app.post("/messages", async (req, res) => {
   const { user, message, room, fileUrl } = req.body;
